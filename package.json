@@ -1,0 +1,17 @@
+{
+  "name": "schaetzquiz",
+  "version": "1.0.0",
+  "description": "Schätzquiz für Mitarbeiterversammlung",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.3",
+    "socket.io": "^4.7.5",
+    "qrcode": "^1.5.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
