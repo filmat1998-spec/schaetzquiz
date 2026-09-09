@@ -1,13 +1,15 @@
-// Schätzquiz Web-App für Mitarbeiterversammlungen
-// ------------------------------------------------
+// Self-paced Schätzquiz Web-App für Mitarbeiterversammlungen
+// -----------------------------------------------------------
 // Online-Start über Render:
 //   Build Command: npm install
 //   Start Command: npm start
 //   Environment Variable optional: ADMIN_PIN=2468
 //
-// Lokal, falls irgendwann möglich:
-//   npm install
-//   ADMIN_PIN=2468 node server.js
+// Benötigte package.json:
+// {
+//   "scripts": { "start": "node server.js" },
+//   "dependencies": { "express": "^4.18.3", "socket.io": "^4.7.5", "qrcode": "^1.5.3" }
+// }
 
 const os = require("os");
 const http = require("http");
@@ -20,19 +22,13 @@ const ADMIN_PIN = String(process.env.ADMIN_PIN || "1234").trim();
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 const state = {
-  participants: {},
+  quizStatus: "draft", // draft | open | closed | released
+  teams: {},
   questions: [],
-  answers: {},
-  scores: {},
-  currentQuestionId: null,
-  status: "lobby",
-  awarded: {},
-  history: []
+  answers: {}
 };
 
 function now() {
@@ -43,18 +39,32 @@ function makeId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function cleanText(value, max = 120) {
+function cleanText(value, max = 160) {
   return String(value || "").replace(/[<>]/g, "").trim().slice(0, max);
+}
+
+function teamKey(value) {
+  return cleanText(value, 80).toLowerCase().replace(/\s+/g, " ");
 }
 
 function parseNumber(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
 
-  const normalized = String(value || "")
-    .trim()
-    .replace(/\s/g, "")
-    .replace(/\./g, "")
-    .replace(",", ".");
+  const input = String(value || "").trim().replace(/\s/g, "");
+  if (!input) return null;
+
+  let normalized = input;
+
+  if (input.includes(",")) {
+    normalized = input.replace(/\./g, "").replace(",", ".");
+  } else {
+    const dotCount = (input.match(/\./g) || []).length;
+    if (dotCount > 1) {
+      normalized = input.replace(/\./g, "");
+    } else if (/^[-+]?\d{1,3}\.\d{3}$/.test(input)) {
+      normalized = input.replace(/\./g, "");
+    }
+  }
 
   if (!/^[-+]?\d+(\.\d+)?$/.test(normalized)) return null;
 
@@ -65,136 +75,6 @@ function parseNumber(value) {
 function fmt(number) {
   if (!Number.isFinite(number)) return "";
   return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(number);
-}
-
-function currentQuestion() {
-  return state.questions.find(question => question.id === state.currentQuestionId) || null;
-}
-
-function getResults(questionId) {
-  const question = state.questions.find(item => item.id === questionId);
-  if (!question) return [];
-
-  const rows = Object.entries(state.answers[questionId] || {}).map(([participantId, answer]) => {
-    const participant = state.participants[participantId] || { name: "Unbekannt" };
-    const diff = Math.abs(answer.value - question.answer);
-    return {
-      participantId,
-      name: participant.name,
-      value: answer.value,
-      valueLabel: fmt(answer.value),
-      diff,
-      diffLabel: fmt(diff),
-      at: answer.at
-    };
-  });
-
-  rows.sort((a, b) => a.diff - b.diff || a.at - b.at || a.name.localeCompare(b.name));
-
-  let lastDiff = null;
-  let rank = 0;
-
-  rows.forEach((row, index) => {
-    if (lastDiff === null || row.diff !== lastDiff) rank = index + 1;
-    row.rank = rank;
-    lastDiff = row.diff;
-  });
-
-  return rows;
-}
-
-function awardCurrentQuestion() {
-  const question = currentQuestion();
-  if (!question || state.awarded[question.id]) return;
-
-  const results = getResults(question.id);
-  const points = { 1: 3, 2: 2, 3: 1 };
-
-  results.forEach(result => {
-    if (result.rank <= 3) {
-      state.scores[result.participantId] = (state.scores[result.participantId] || 0) + points[result.rank];
-    }
-  });
-
-  state.awarded[question.id] = true;
-  state.history.push({
-    questionId: question.id,
-    text: question.text,
-    answer: question.answer,
-    unit: question.unit,
-    winners: results.filter(result => result.rank === 1).map(result => result.name)
-  });
-}
-
-function leaderboard() {
-  const rows = Object.values(state.participants).map(participant => ({
-    participantId: participant.id,
-    name: participant.name,
-    score: state.scores[participant.id] || 0,
-    online: participant.online
-  }));
-
-  rows.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-
-  let lastScore = null;
-  let rank = 0;
-
-  rows.forEach((row, index) => {
-    if (lastScore === null || row.score !== lastScore) rank = index + 1;
-    row.rank = rank;
-    lastScore = row.score;
-  });
-
-  return rows;
-}
-
-function adminPayload() {
-  const question = currentQuestion();
-  return {
-    participants: Object.values(state.participants).sort((a, b) => a.name.localeCompare(b.name)),
-    questions: state.questions,
-    currentQuestion: question,
-    status: state.status,
-    answerCount: question ? Object.keys(state.answers[question.id] || {}).length : 0,
-    results: question ? getResults(question.id) : [],
-    leaderboard: leaderboard(),
-    history: state.history
-  };
-}
-
-function participantPayload(participantId) {
-  const question = currentQuestion();
-  const answer = question ? (state.answers[question.id] || {})[participantId] : null;
-  const results = question && state.status === "revealed" ? getResults(question.id) : [];
-  const ownResult = results.find(result => result.participantId === participantId) || null;
-
-  return {
-    participant: state.participants[participantId] || null,
-    currentQuestion: question ? { id: question.id, text: question.text, unit: question.unit } : null,
-    correctAnswer: question && state.status === "revealed" ? question.answer : null,
-    status: state.status,
-    answer: answer ? { value: answer.value, valueLabel: fmt(answer.value) } : null,
-    results: results.slice(0, 8),
-    ownResult,
-    leaderboard: leaderboard().slice(0, 10),
-    history: state.history
-  };
-}
-
-function pushAll() {
-  io.to("admins").emit("adminState", adminPayload());
-
-  Object.keys(state.participants).forEach(participantId => {
-    io.to("participant:" + participantId).emit("participantState", participantPayload(participantId));
-  });
-}
-
-function requireAdmin(socket) {
-  if (!socket.data.isAdmin) {
-    socket.emit("adminError", "Bitte zuerst als Moderation anmelden.");
-    return false;
-  }
-  return true;
 }
 
 function baseUrl(req) {
@@ -209,13 +89,259 @@ function localUrls() {
 
   Object.keys(nets).forEach(name => {
     (nets[name] || []).forEach(net => {
-      if (net.family === "IPv4" && !net.internal) {
-        urls.push("http://" + net.address + ":" + PORT + "/");
-      }
+      if (net.family === "IPv4" && !net.internal) urls.push("http://" + net.address + ":" + PORT + "/");
     });
   });
 
   return urls;
+}
+
+function getTeamAnswers(key) {
+  const result = {};
+  state.questions.forEach(question => {
+    const answer = (state.answers[question.id] || {})[key];
+    if (answer) result[question.id] = answer;
+  });
+  return result;
+}
+
+function countTeamAnswers(key) {
+  return Object.keys(getTeamAnswers(key)).length;
+}
+
+function totalPossibleAnswers() {
+  return Object.keys(state.teams).length * state.questions.length;
+}
+
+function totalGivenAnswers() {
+  let count = 0;
+  state.questions.forEach(question => {
+    count += Object.keys(state.answers[question.id] || {}).length;
+  });
+  return count;
+}
+
+function questionStats() {
+  return state.questions.map((question, index) => ({
+    id: question.id,
+    index,
+    text: question.text,
+    unit: question.unit,
+    answerCount: Object.keys(state.answers[question.id] || {}).length
+  }));
+}
+
+function teamProgress() {
+  return Object.values(state.teams)
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map(team => {
+      const answered = countTeamAnswers(team.key);
+      return {
+        key: team.key,
+        label: team.label,
+        online: team.online,
+        answered,
+        total: state.questions.length,
+        complete: state.questions.length > 0 && answered >= state.questions.length
+      };
+    });
+}
+
+function getQuestionResults(questionId) {
+  const question = state.questions.find(item => item.id === questionId);
+  if (!question) return [];
+
+  const rows = Object.entries(state.answers[questionId] || {}).map(([key, answer]) => {
+    const team = state.teams[key] || { label: "Unbekannt" };
+    const diff = Math.abs(answer.value - question.answer);
+    return {
+      teamKey: key,
+      teamLabel: team.label,
+      value: answer.value,
+      valueLabel: fmt(answer.value),
+      diff,
+      diffLabel: fmt(diff),
+      at: answer.at
+    };
+  });
+
+  rows.sort((a, b) => a.diff - b.diff || a.at - b.at || a.teamLabel.localeCompare(b.teamLabel));
+
+  let lastDiff = null;
+  let rank = 0;
+  rows.forEach((row, index) => {
+    if (lastDiff === null || row.diff !== lastDiff) rank = index + 1;
+    row.rank = rank;
+    lastDiff = row.diff;
+  });
+
+  return rows;
+}
+
+function allQuestionResults() {
+  return state.questions.map(question => {
+    const results = getQuestionResults(question.id);
+    return {
+      id: question.id,
+      text: question.text,
+      answer: question.answer,
+      answerLabel: fmt(question.answer),
+      unit: question.unit,
+      explanation: question.explanation,
+      answerCount: results.length,
+      winners: results.filter(row => row.rank === 1).map(row => row.teamLabel),
+      results
+    };
+  });
+}
+
+function scoreMap() {
+  const map = {};
+
+  Object.values(state.teams).forEach(team => {
+    map[team.key] = {
+      teamKey: team.key,
+      teamLabel: team.label,
+      score: 0,
+      totalDiff: 0,
+      answered: 0,
+      avgDiff: Infinity
+    };
+  });
+
+  state.questions.forEach(question => {
+    const rows = getQuestionResults(question.id);
+    rows.forEach(row => {
+      if (!map[row.teamKey]) {
+        map[row.teamKey] = {
+          teamKey: row.teamKey,
+          teamLabel: row.teamLabel,
+          score: 0,
+          totalDiff: 0,
+          answered: 0,
+          avgDiff: Infinity
+        };
+      }
+
+      if (row.rank === 1) map[row.teamKey].score += 3;
+      if (row.rank === 2) map[row.teamKey].score += 2;
+      if (row.rank === 3) map[row.teamKey].score += 1;
+
+      map[row.teamKey].totalDiff += row.diff;
+      map[row.teamKey].answered += 1;
+    });
+  });
+
+  Object.values(map).forEach(row => {
+    row.avgDiff = row.answered ? row.totalDiff / row.answered : Infinity;
+    row.avgDiffLabel = Number.isFinite(row.avgDiff) ? fmt(row.avgDiff) : "-";
+  });
+
+  return map;
+}
+
+function leaderboard() {
+  const rows = Object.values(scoreMap());
+
+  rows.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (a.avgDiff !== b.avgDiff) return a.avgDiff - b.avgDiff;
+    return a.teamLabel.localeCompare(b.teamLabel);
+  });
+
+  let lastScore = null;
+  let lastAvg = null;
+  let rank = 0;
+
+  rows.forEach((row, index) => {
+    if (lastScore === null || row.score !== lastScore || row.avgDiff !== lastAvg) rank = index + 1;
+    row.rank = rank;
+    lastScore = row.score;
+    lastAvg = row.avgDiff;
+  });
+
+  return rows;
+}
+
+function teamQuestionDetails(key) {
+  const questions = allQuestionResults();
+  return questions.map(question => {
+    const own = question.results.find(row => row.teamKey === key) || null;
+    return {
+      id: question.id,
+      text: question.text,
+      answer: question.answer,
+      answerLabel: question.answerLabel,
+      unit: question.unit,
+      explanation: question.explanation,
+      ownValue: own ? own.value : null,
+      ownValueLabel: own ? own.valueLabel : "-",
+      ownDiff: own ? own.diff : null,
+      ownDiffLabel: own ? own.diffLabel : "-",
+      ownRank: own ? own.rank : null,
+      winners: question.winners
+    };
+  });
+}
+
+function adminPayload() {
+  return {
+    quizStatus: state.quizStatus,
+    adminPin: ADMIN_PIN,
+    teams: Object.values(state.teams).sort((a, b) => a.label.localeCompare(b.label)),
+    questions: state.questions,
+    questionStats: questionStats(),
+    teamProgress: teamProgress(),
+    totalAnswers: totalGivenAnswers(),
+    totalPossibleAnswers: totalPossibleAnswers(),
+    leaderboard: leaderboard(),
+    questionResults: allQuestionResults()
+  };
+}
+
+function participantPayload(key) {
+  const team = state.teams[key] || null;
+  const answers = getTeamAnswers(key);
+  const nextQuestion = state.questions.find(question => !answers[question.id]) || null;
+  const board = leaderboard();
+  const ownRank = board.find(row => row.teamKey === key) || null;
+
+  return {
+    quizStatus: state.quizStatus,
+    team,
+    questionCount: state.questions.length,
+    answeredCount: Object.keys(answers).length,
+    nextQuestion: state.quizStatus === "open" && nextQuestion ? {
+      id: nextQuestion.id,
+      index: state.questions.findIndex(question => question.id === nextQuestion.id),
+      text: nextQuestion.text,
+      unit: nextQuestion.unit
+    } : null,
+    ownRank: state.quizStatus === "released" ? ownRank : null,
+    leaderboard: state.quizStatus === "released" ? board.slice(0, 5) : [],
+    questionDetails: state.quizStatus === "released" ? teamQuestionDetails(key) : []
+  };
+}
+
+function pushAdmin() {
+  io.to("admins").emit("adminState", adminPayload());
+}
+
+function pushTeam(key) {
+  io.to("team:" + key).emit("participantState", participantPayload(key));
+}
+
+function pushAll() {
+  pushAdmin();
+  Object.keys(state.teams).forEach(pushTeam);
+}
+
+function requireAdmin(socket) {
+  if (!socket.data.isAdmin) {
+    socket.emit("adminError", "Bitte zuerst als Moderation anmelden.");
+    return false;
+  }
+  return true;
 }
 
 app.get("/healthz", (req, res) => {
@@ -241,42 +367,66 @@ app.get("/admin", (req, res) => res.send(adminHtml()));
 
 io.on("connection", socket => {
   socket.on("participantJoin", data => {
-    const participantId = cleanText(data && data.id, 40) || makeId();
-    const name = cleanText(data && data.name, 40) || "Gast";
+    const label = cleanText(data && data.teamLabel, 80);
+    const key = teamKey(label);
 
-    state.participants[participantId] = {
-      id: participantId,
-      name,
+    if (!label || !key) {
+      socket.emit("participantError", "Bitte gebt euren Teamnamen oder euer Symbol ein.");
+      return;
+    }
+
+    state.teams[key] = {
+      key,
+      label,
       online: true,
-      joinedAt: state.participants[participantId]?.joinedAt || now(),
+      joinedAt: state.teams[key]?.joinedAt || now(),
       lastSeen: now()
     };
 
-    socket.data.participantId = participantId;
-    socket.join("participant:" + participantId);
-    socket.emit("participantAccepted", { id: participantId, name });
-    socket.emit("participantState", participantPayload(participantId));
+    socket.data.teamKey = key;
+    socket.join("team:" + key);
+    socket.emit("participantAccepted", { teamKey: key, teamLabel: label });
+    socket.emit("participantState", participantPayload(key));
     pushAll();
   });
 
-  socket.on("submitGuess", data => {
-    const participantId = socket.data.participantId;
-    const question = currentQuestion();
+  socket.on("submitAnswer", data => {
+    const key = socket.data.teamKey;
+    const questionId = String(data && data.questionId || "");
+    const question = state.questions.find(item => item.id === questionId);
 
-    if (!participantId || !question || state.status !== "open") return;
-    if (String(data && data.questionId) !== question.id) return;
+    if (!key || !state.teams[key]) {
+      socket.emit("participantError", "Bitte tretet zuerst mit eurem Teamnamen oder Symbol bei.");
+      return;
+    }
+
+    if (state.quizStatus !== "open") {
+      socket.emit("participantError", "Das Quiz ist aktuell nicht für Antworten geöffnet.");
+      return;
+    }
+
+    if (!question) {
+      socket.emit("participantError", "Diese Frage wurde nicht gefunden.");
+      return;
+    }
+
+    state.answers[questionId] ||= {};
+
+    if (state.answers[questionId][key]) {
+      socket.emit("participantError", "Diese Frage wurde von euch bereits beantwortet.");
+      socket.emit("participantState", participantPayload(key));
+      return;
+    }
 
     const value = parseNumber(data && data.value);
 
     if (value === null) {
-      socket.emit("participantError", "Bitte gib eine gültige Zahl ein.");
+      socket.emit("participantError", "Bitte gebt eine gültige Zahl ein, z. B. 1500 oder 12,5.");
       return;
     }
 
-    state.answers[question.id] ||= {};
-    state.answers[question.id][participantId] = { value, at: now() };
-
-    socket.emit("participantState", participantPayload(participantId));
+    state.answers[questionId][key] = { value, at: now() };
+    socket.emit("participantState", participantPayload(key));
     pushAll();
   });
 
@@ -298,16 +448,22 @@ io.on("connection", socket => {
   socket.on("adminAddQuestion", data => {
     if (!requireAdmin(socket)) return;
 
-    const text = cleanText(data && data.text, 180);
-    const answer = parseNumber(data && data.answer);
-    const unit = cleanText(data && data.unit, 30);
-
-    if (!text || answer === null) {
-      socket.emit("adminError", "Bitte Frage und richtige Zahl eintragen.");
+    if (state.quizStatus !== "draft") {
+      socket.emit("adminError", "Fragen können nur geändert werden, solange das Quiz noch nicht geöffnet wurde.");
       return;
     }
 
-    const question = { id: makeId(), text, answer, unit };
+    const text = cleanText(data && data.text, 220);
+    const answer = parseNumber(data && data.answer);
+    const unit = cleanText(data && data.unit, 40);
+    const explanation = cleanText(data && data.explanation, 360);
+
+    if (!text || answer === null) {
+      socket.emit("adminError", "Bitte Fragetext und richtige Zahl eintragen.");
+      return;
+    }
+
+    const question = { id: makeId(), text, answer, unit, explanation };
     state.questions.push(question);
     state.answers[question.id] = {};
     pushAll();
@@ -316,96 +472,91 @@ io.on("connection", socket => {
   socket.on("adminRemoveQuestion", data => {
     if (!requireAdmin(socket)) return;
 
-    const questionId = String(data && data.id);
-    state.questions = state.questions.filter(question => question.id !== questionId);
-    delete state.answers[questionId];
-    delete state.awarded[questionId];
-
-    if (state.currentQuestionId === questionId) {
-      state.currentQuestionId = null;
-      state.status = "lobby";
+    if (state.quizStatus !== "draft") {
+      socket.emit("adminError", "Fragen können nur gelöscht werden, solange das Quiz noch nicht geöffnet wurde.");
+      return;
     }
 
+    const questionId = String(data && data.id || "");
+    state.questions = state.questions.filter(question => question.id !== questionId);
+    delete state.answers[questionId];
     pushAll();
   });
 
-  socket.on("adminStartQuestion", data => {
+  socket.on("adminOpenQuiz", () => {
     if (!requireAdmin(socket)) return;
 
-    const questionId = String(data && data.id);
-    if (!state.questions.find(question => question.id === questionId)) return;
+    if (!state.questions.length) {
+      socket.emit("adminError", "Bitte zuerst mindestens eine Frage anlegen.");
+      return;
+    }
 
-    state.currentQuestionId = questionId;
-    state.status = "open";
-    state.answers[questionId] = {};
-    delete state.awarded[questionId];
+    state.quizStatus = "open";
     pushAll();
   });
 
-  socket.on("adminCloseQuestion", () => {
+  socket.on("adminCloseQuiz", () => {
     if (!requireAdmin(socket)) return;
-    if (!currentQuestion()) return;
 
-    state.status = "closed";
+    if (state.quizStatus !== "open") {
+      socket.emit("adminError", "Das Quiz ist aktuell nicht offen.");
+      return;
+    }
+
+    state.quizStatus = "closed";
     pushAll();
   });
 
-  socket.on("adminRevealQuestion", () => {
+  socket.on("adminReleaseResults", () => {
     if (!requireAdmin(socket)) return;
-    if (!currentQuestion()) return;
 
-    awardCurrentQuestion();
-    state.status = "revealed";
+    if (state.quizStatus !== "closed" && state.quizStatus !== "released") {
+      socket.emit("adminError", "Bitte das Quiz zuerst schließen.");
+      return;
+    }
+
+    state.quizStatus = "released";
     pushAll();
   });
 
-  socket.on("adminBackToLobby", () => {
+  socket.on("adminResetTeams", () => {
     if (!requireAdmin(socket)) return;
 
-    state.currentQuestionId = null;
-    state.status = "lobby";
-    pushAll();
-  });
-
-  socket.on("adminResetScores", () => {
-    if (!requireAdmin(socket)) return;
-
-    state.scores = {};
-    state.awarded = {};
-    state.history = [];
+    state.teams = {};
+    state.answers = {};
+    state.questions.forEach(question => {
+      state.answers[question.id] = {};
+    });
+    state.quizStatus = "draft";
     pushAll();
   });
 
   socket.on("adminResetAll", () => {
     if (!requireAdmin(socket)) return;
 
-    state.participants = {};
+    state.teams = {};
     state.questions = [];
     state.answers = {};
-    state.scores = {};
-    state.currentQuestionId = null;
-    state.status = "lobby";
-    state.awarded = {};
-    state.history = [];
+    state.quizStatus = "draft";
     pushAll();
   });
 
   socket.on("disconnect", () => {
-    const participantId = socket.data.participantId;
+    const key = socket.data.teamKey;
 
-    if (participantId && state.participants[participantId]) {
-      state.participants[participantId].online = false;
-      state.participants[participantId].lastSeen = now();
+    if (key && state.teams[key]) {
+      state.teams[key].online = false;
+      state.teams[key].lastSeen = now();
       pushAll();
     }
   });
 });
 
 server.listen(PORT, () => {
-  console.log("\nSchätzquiz läuft.");
+  console.log("\nSelf-paced Schätzquiz läuft.");
   console.log("Moderations-PIN:", ADMIN_PIN);
   console.log("\nAdressen:");
-  localUrls().forEach(url => console.log("  Teilnehmende: " + url + " | Admin: " + url + "admin"));
+  localUrls().forEach(url => console.log("  Teams: " + url + " | Admin: " + url + "admin"));
   console.log("");
 });
 
@@ -432,52 +583,23 @@ function commonHead(title) {
 }
 *{box-sizing:border-box}
 body{margin:0;background:radial-gradient(circle at top left,#FFE9B5,transparent 34%),var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;line-height:1.45}
-.wrap{max-width:1120px;margin:0 auto;padding:24px}
+.wrap{max-width:1180px;margin:0 auto;padding:24px}
 .narrow{max-width:760px}
 .hero{padding:32px 0 18px}
 .brand{display:inline-flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;color:var(--accent)}
 .dot{width:14px;height:14px;border-radius:50%;background:var(--accent2);box-shadow:18px 0 0 var(--accent),36px 0 0 var(--warn)}
 h1{font-family:Georgia,serif;font-size:clamp(34px,6vw,72px);line-height:.94;margin:18px 0 10px;letter-spacing:-.05em}
 h2{font-family:Georgia,serif;font-size:30px;margin:0 0 16px;letter-spacing:-.03em}
-h3{margin:0 0 10px;font-size:19px}
-.sub{font-size:19px;color:var(--muted);max-width:720px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+h3{margin:0 0 10px;font-size:19px}.sub{font-size:19px;color:var(--muted);max-width:760px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .card{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:var(--shadow)}
-.panel{background:#231B16;color:#FFF8EA;border-radius:22px;padding:24px}
-.panel .muted{color:#E8D6BA}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.between{display:flex;justify-content:space-between;gap:12px;align-items:center}
-.muted{color:var(--muted)}
-.big{font-size:24px}
-.huge{font-size:44px;font-weight:900}
-.ok{color:var(--good)}
-.bad{color:var(--bad)}
-input,button,textarea{font:inherit}
-input,textarea{width:100%;border:1px solid var(--line);background:#FFFDF8;border-radius:12px;padding:13px 14px;color:var(--ink)}
-textarea{min-height:86px;resize:vertical}
-label{display:block;font-weight:700;margin:12px 0 6px}
-.btn{border:0;border-radius:999px;background:var(--ink);color:#fff;padding:12px 18px;font-weight:800;cursor:pointer;transition:.15s transform,.15s opacity}
-.btn:hover{transform:translateY(-1px)}
-.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
-.btn.alt{background:var(--accent)}
-.btn.green{background:var(--accent2)}
-.btn.ghost{background:#F4E6CC;color:var(--ink)}
-.btn.danger{background:var(--bad)}
-.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:#FFFDF8;border-radius:999px;padding:7px 11px;font-size:14px;font-weight:800}
-.status{background:#241A14;color:#FFF8EA;border-color:#241A14}
-.list{display:grid;gap:10px}
-.item{border:1px solid var(--line);background:#FFFDF8;border-radius:14px;padding:14px}
-.table{width:100%;border-collapse:collapse}
-.table th,.table td{text-align:left;border-bottom:1px solid var(--line);padding:10px 8px}
-.table th{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-.rank{font-weight:900;font-size:20px}
-.qr{width:220px;max-width:100%;background:#FFF8EA;border-radius:16px;padding:10px}
-.screen{min-height:56vh;display:grid;place-items:center;text-align:center}
-.answerBox{font-size:30px;text-align:center;font-weight:900}
-.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#1F1A17;color:white;padding:12px 16px;border-radius:999px;box-shadow:var(--shadow);display:none;z-index:5}
-.toast.show{display:block}
-.hide{display:none!important}
-@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:16px}h1{font-size:42px}.between{align-items:flex-start;flex-direction:column}.huge{font-size:34px}}
+.panel{background:#231B16;color:#FFF8EA;border-radius:22px;padding:24px}.panel .muted{color:#E8D6BA}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.between{display:flex;justify-content:space-between;gap:12px;align-items:center}.muted{color:var(--muted)}.big{font-size:24px}.huge{font-size:44px;font-weight:900}.ok{color:var(--good)}.bad{color:var(--bad)}
+input,button,textarea{font:inherit}input,textarea{width:100%;border:1px solid var(--line);background:#FFFDF8;border-radius:12px;padding:13px 14px;color:var(--ink)}textarea{min-height:86px;resize:vertical}label{display:block;font-weight:700;margin:12px 0 6px}
+.btn{border:0;border-radius:999px;background:var(--ink);color:#fff;padding:12px 18px;font-weight:800;cursor:pointer;transition:.15s transform,.15s opacity}.btn:hover{transform:translateY(-1px)}.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}.btn.alt{background:var(--accent)}.btn.green{background:var(--accent2)}.btn.ghost{background:#F4E6CC;color:var(--ink)}.btn.danger{background:var(--bad)}
+.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:#FFFDF8;border-radius:999px;padding:7px 11px;font-size:14px;font-weight:800}.status{background:#241A14;color:#FFF8EA;border-color:#241A14}.list{display:grid;gap:10px}.item{border:1px solid var(--line);background:#FFFDF8;border-radius:14px;padding:14px}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;border-bottom:1px solid var(--line);padding:10px 8px;vertical-align:top}.table th{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.rank{font-weight:900;font-size:20px}.qr{width:220px;max-width:100%;background:#FFF8EA;border-radius:16px;padding:10px}.screen{min-height:54vh;display:grid;place-items:center;text-align:center}.answerBox{font-size:30px;text-align:center;font-weight:900}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#1F1A17;color:white;padding:12px 16px;border-radius:999px;box-shadow:var(--shadow);display:none;z-index:5}.toast.show{display:block}.hide{display:none!important}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 18px}.tab{border:1px solid var(--line);background:#FFFDF8;color:var(--ink);border-radius:999px;padding:10px 14px;font-weight:800;cursor:pointer}.tab.active{background:var(--ink);color:#fff;border-color:var(--ink)}.tabPage{display:none}.tabPage.active{display:block}.metric{font-size:32px;font-weight:900}.progressOuter{height:12px;border-radius:999px;background:#F0DFC1;overflow:hidden}.progressInner{height:100%;background:var(--accent2);width:0}.podium{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:16px;align-items:end;margin-top:22px}.podiumCard{background:#FFFDF8;border:1px solid var(--line);border-radius:22px;padding:24px;text-align:center}.podiumCard.first{background:#231B16;color:#FFF8EA;min-height:260px}.podiumCard.second{min-height:220px}.podiumCard.third{min-height:190px}.medal{font-size:52px}.small{font-size:14px}
+@media(max-width:860px){.grid,.grid3,.grid4,.podium{grid-template-columns:1fr}.wrap{padding:16px}h1{font-size:42px}.between{align-items:flex-start;flex-direction:column}.huge{font-size:34px}.tabs{overflow:auto;flex-wrap:nowrap;padding-bottom:4px}.tab{white-space:nowrap}}
 </style>
 </head>`;
 }
@@ -489,14 +611,14 @@ function participantHtml() {
   <section class="hero">
     <div class="brand"><span class="dot"></span><span>Schätzquiz</span></div>
     <h1>Wer liegt am nächsten?</h1>
-    <p class="sub">Gib deinen Namen ein, schätze die Zahl und sammle Punkte.</p>
+    <p class="sub">Gebt euer zugeordnetes Symbol ein und beantwortet die Schätzfragen in eurem Tempo.</p>
   </section>
 
   <section id="join" class="card">
     <h2>Mitspielen</h2>
-    <label for="name">Dein Name oder Teamname</label>
-    <input id="name" maxlength="40" autocomplete="name" placeholder="z. B. Anna oder Team Einkauf">
-    <div style="height:14px"></div>
+    <label for="teamLabel">Teamname / Symbol eingeben</label>
+    <input id="teamLabel" maxlength="80" autocomplete="off" placeholder="z. B. Team Sonne oder Symbol Stern">
+    <p class="muted">Bitte gebt nur euren Teamnamen oder das euch zugeordnete Symbol ein.</p>
     <button class="btn alt" id="joinBtn">Beitreten</button>
   </section>
 
@@ -506,15 +628,10 @@ function participantHtml() {
 <script src="/socket.io/socket.io.js"></script>
 <script>
 var socket = io();
-var pidKey = "schaetzquizTeilnehmerId";
-var nameKey = "schaetzquizName";
-var pid = localStorage.getItem(pidKey) || Math.random().toString(36).slice(2,10);
-var lastState = null;
+var teamStorageKey = "schaetzquizTeamLabel";
+var currentState = null;
 
-function qs(selector) {
-  return document.querySelector(selector);
-}
-
+function qs(selector) { return document.querySelector(selector); }
 function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"]/g, function(character) {
     if (character === "&") return "&amp;";
@@ -523,108 +640,139 @@ function escapeHtml(value) {
     return "&quot;";
   });
 }
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(value);
-}
-
+function formatNumber(value) { return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(value); }
 function toast(message) {
   var element = qs("#toast");
   element.textContent = message;
   element.classList.add("show");
-  setTimeout(function() { element.classList.remove("show"); }, 2400);
+  setTimeout(function() { element.classList.remove("show"); }, 2600);
 }
-
+function clear(element) { while (element.firstChild) element.removeChild(element.firstChild); }
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
 function join() {
-  var name = qs("#name").value.trim();
-  if (!name) {
-    toast("Bitte Namen eingeben.");
-    return;
+  var label = qs("#teamLabel").value.trim();
+  if (!label) { toast("Bitte Teamnamen oder Symbol eingeben."); return; }
+  localStorage.setItem(teamStorageKey, label);
+  socket.emit("participantJoin", { teamLabel: label });
+}
+function submitAnswer() {
+  if (!currentState || !currentState.nextQuestion) return;
+  var input = qs("#answerInput");
+  socket.emit("submitAnswer", { questionId: currentState.nextQuestion.id, value: input ? input.value : "" });
+}
+function renderWaiting(text) {
+  var root = qs("#game");
+  clear(root);
+  var card = el("div", "card screen");
+  var inner = el("div");
+  inner.appendChild(el("div", "pill status", "Wartebereich"));
+  inner.appendChild(el("h2", "", text));
+  inner.appendChild(el("p", "sub", "Bitte lasst diese Seite geöffnet."));
+  card.appendChild(inner);
+  root.appendChild(card);
+}
+function renderQuestion(state) {
+  var root = qs("#game");
+  clear(root);
+  var q = state.nextQuestion;
+  var card = el("div", "panel");
+  card.appendChild(el("div", "pill", "Frage " + (q.index + 1) + " von " + state.questionCount));
+  card.appendChild(el("h2", "", q.text));
+  if (q.unit) card.appendChild(el("p", "muted", "Einheit: " + q.unit));
+  var input = el("input", "answerBox");
+  input.id = "answerInput";
+  input.inputMode = "decimal";
+  input.placeholder = "Eure Schätzung";
+  card.appendChild(input);
+  var spacer = el("div");
+  spacer.style.height = "14px";
+  card.appendChild(spacer);
+  var button = el("button", "btn alt", "Antwort absenden");
+  button.id = "answerButton";
+  button.onclick = submitAnswer;
+  card.appendChild(button);
+  var hint = el("p", "muted", "Nach dem Absenden geht es automatisch zur nächsten Frage. Antworten können danach nicht geändert werden.");
+  card.appendChild(hint);
+  root.appendChild(card);
+  setTimeout(function() { input.focus(); }, 50);
+  input.addEventListener("keydown", function(event) { if (event.key === "Enter") submitAnswer(); });
+}
+function renderDone() {
+  var root = qs("#game");
+  clear(root);
+  var card = el("div", "card screen");
+  var inner = el("div");
+  inner.appendChild(el("div", "pill status", "Fertig"));
+  inner.appendChild(el("h2", "", "Danke, eure Antworten wurden gespeichert."));
+  inner.appendChild(el("p", "sub", "Die Ergebnisse werden später freigegeben."));
+  card.appendChild(inner);
+  root.appendChild(card);
+}
+function renderReleased(state) {
+  var root = qs("#game");
+  clear(root);
+  var card = el("div", "card");
+  card.appendChild(el("div", "pill status", "Ergebnisse freigegeben"));
+  card.appendChild(el("h2", "", "Eure Auswertung"));
+  if (state.ownRank) {
+    card.appendChild(el("p", "big", "Gesamtplatz: #" + state.ownRank.rank + " · Punkte: " + state.ownRank.score + " · Ø Abstand: " + state.ownRank.avgDiffLabel));
   }
-
-  localStorage.setItem(pidKey, pid);
-  localStorage.setItem(nameKey, name);
-  socket.emit("participantJoin", { id: pid, name: name });
+  card.appendChild(el("h3", "", "Top 5 Gesamtrangliste"));
+  card.appendChild(table(["Platz", "Team/Symbol", "Punkte", "Ø Abstand"], state.leaderboard.map(function(row) {
+    return ["#" + row.rank, row.teamLabel, String(row.score), row.avgDiffLabel];
+  })));
+  card.appendChild(el("h3", "", "Eure Antworten je Frage"));
+  state.questionDetails.forEach(function(q) {
+    var item = el("div", "item");
+    item.appendChild(el("h3", "", q.text));
+    item.appendChild(el("p", "", "Richtige Antwort: " + q.answerLabel + " " + (q.unit || "")));
+    item.appendChild(el("p", "", "Eure Schätzung: " + q.ownValueLabel + " " + (q.unit || "")));
+    item.appendChild(el("p", "", "Abstand: " + q.ownDiffLabel + " " + (q.unit || "") + " · Platz: " + (q.ownRank ? "#" + q.ownRank : "-")));
+    item.appendChild(el("p", "muted", "Gewinnerteam(s): " + (q.winners.length ? q.winners.join(", ") : "-")));
+    if (q.explanation) item.appendChild(el("p", "muted", q.explanation));
+    card.appendChild(item);
+  });
+  root.appendChild(card);
 }
-
-function submitGuess() {
-  var input = qs("#guess");
-  if (!lastState || !lastState.currentQuestion || !input) return;
-  socket.emit("submitGuess", { questionId: lastState.currentQuestion.id, value: input.value });
+function table(headers, rows) {
+  var t = el("table", "table");
+  var thead = document.createElement("thead");
+  var hr = document.createElement("tr");
+  headers.forEach(function(header) { hr.appendChild(el("th", "", header)); });
+  thead.appendChild(hr);
+  t.appendChild(thead);
+  var tbody = document.createElement("tbody");
+  rows.forEach(function(row) {
+    var tr = document.createElement("tr");
+    row.forEach(function(cell) { tr.appendChild(el("td", "", cell)); });
+    tbody.appendChild(tr);
+  });
+  t.appendChild(tbody);
+  return t;
 }
-
-function resultsHtml(rows, unit) {
-  if (!rows.length) return '<p class="muted">Noch keine Ergebnisse.</p>';
-
-  return '<h3>Beste Schätzungen</h3><table class="table"><thead><tr><th>Platz</th><th>Name</th><th>Schätzung</th><th>Abstand</th></tr></thead><tbody>' +
-    rows.map(function(row) {
-      return '<tr><td class="rank">#' + row.rank + '</td><td>' + escapeHtml(row.name) + '</td><td>' + escapeHtml(row.valueLabel) + ' ' + escapeHtml(unit) + '</td><td>' + escapeHtml(row.diffLabel) + ' ' + escapeHtml(unit) + '</td></tr>';
-    }).join('') +
-    '</tbody></table>';
-}
-
-function leaderboardHtml(rows) {
-  if (!rows.length) return '';
-
-  return '<div style="height:18px"></div><h3>Gesamtrangliste</h3><table class="table"><tbody>' +
-    rows.slice(0, 5).map(function(row) {
-      return '<tr><td class="rank">#' + row.rank + '</td><td>' + escapeHtml(row.name) + '</td><td><b>' + row.score + '</b> Punkte</td></tr>';
-    }).join('') +
-    '</tbody></table>';
-}
-
 function render(state) {
-  var element = qs("#game");
-  if (!state.participant) return;
-
-  if (!state.currentQuestion) {
-    element.innerHTML = '<div class="card screen"><div><div class="pill status">Wartebereich</div><h2>Hallo ' + escapeHtml(state.participant.name) + '</h2><p class="sub">Die Moderation startet gleich die nächste Schätzfrage.</p>' + leaderboardHtml(state.leaderboard) + '</div></div>';
-    return;
-  }
-
-  if (state.status === "open") {
-    element.innerHTML = '<div class="panel"><div class="pill">Frage läuft</div><h2 style="font-size:38px;margin-top:18px">' + escapeHtml(state.currentQuestion.text) + '</h2><p class="muted">Gib deine Schätzung als Zahl ein. Du kannst deine Antwort ändern, solange die Frage offen ist.</p><input id="guess" class="answerBox" inputmode="decimal" placeholder="Deine Schätzung" value="' + escapeHtml(state.answer ? state.answer.valueLabel : '') + '"><div style="height:14px"></div><button class="btn alt" id="submitGuessBtn">Schätzung absenden</button>' + (state.answer ? '<p class="ok"><b>Gespeichert:</b> ' + escapeHtml(state.answer.valueLabel) + ' ' + escapeHtml(state.currentQuestion.unit) + '</p>' : '') + '</div>';
-    qs("#submitGuessBtn").onclick = submitGuess;
-    setTimeout(function() {
-      var guess = qs("#guess");
-      if (guess) guess.focus();
-    }, 30);
-    return;
-  }
-
-  if (state.status === "closed") {
-    element.innerHTML = '<div class="card screen"><div><div class="pill status">Antworten geschlossen</div><h2>Danke, deine Schätzung ist drin.</h2><p class="sub">Gleich wird aufgelöst.</p>' + (state.answer ? '<p class="big"><b>Deine Schätzung:</b> ' + escapeHtml(state.answer.valueLabel) + ' ' + escapeHtml(state.currentQuestion.unit) + '</p>' : '<p class="bad">Du hast keine Schätzung abgegeben.</p>') + '</div></div>';
-    return;
-  }
-
-  if (state.status === "revealed") {
-    var unit = state.currentQuestion.unit || "";
-    var own = state.ownResult ? '<p class="big">Dein Platz: <b>#' + state.ownResult.rank + '</b> · Abstand: <b>' + escapeHtml(state.ownResult.diffLabel) + ' ' + escapeHtml(unit) + '</b></p>' : '<p class="bad">Keine gültige Antwort abgegeben.</p>';
-    element.innerHTML = '<div class="card"><div class="pill status">Auflösung</div><h2>' + escapeHtml(state.currentQuestion.text) + '</h2><div class="huge">' + escapeHtml(formatNumber(state.correctAnswer)) + ' ' + escapeHtml(unit) + '</div>' + own + resultsHtml(state.results, unit) + leaderboardHtml(state.leaderboard) + '</div>';
-  }
-}
-
-if (localStorage.getItem(nameKey)) {
-  qs("#name").value = localStorage.getItem(nameKey);
-}
-
-qs("#joinBtn").onclick = join;
-qs("#name").addEventListener("keydown", function(event) {
-  if (event.key === "Enter") join();
-});
-
-socket.on("participantAccepted", function(data) {
-  pid = data.id;
-  localStorage.setItem(pidKey, pid);
+  currentState = state;
+  if (!state.team) return;
   qs("#join").classList.add("hide");
   qs("#game").classList.remove("hide");
-});
-
+  if (state.quizStatus === "draft") return renderWaiting("Das Quiz ist noch nicht geöffnet. Bitte wartet auf die Moderation.");
+  if (state.quizStatus === "closed") return renderWaiting("Das Quiz ist geschlossen. Die Ergebnisse werden gleich freigegeben.");
+  if (state.quizStatus === "released") return renderReleased(state);
+  if (state.quizStatus === "open" && state.nextQuestion) return renderQuestion(state);
+  if (state.quizStatus === "open" && !state.nextQuestion) return renderDone();
+}
+var storedTeam = localStorage.getItem(teamStorageKey);
+if (storedTeam) qs("#teamLabel").value = storedTeam;
+qs("#joinBtn").onclick = join;
+qs("#teamLabel").addEventListener("keydown", function(event) { if (event.key === "Enter") join(); });
+socket.on("participantAccepted", function(data) { localStorage.setItem(teamStorageKey, data.teamLabel); });
 socket.on("participantError", toast);
-socket.on("participantState", function(state) {
-  lastState = state;
-  render(state);
-});
+socket.on("participantState", render);
 </script>
 </body></html>`;
 }
@@ -637,11 +785,11 @@ function adminHtml() {
     <div>
       <div class="brand"><span class="dot"></span><span>Moderation</span></div>
       <h1>Schätzquiz steuern</h1>
-      <p class="sub">Fragen starten, Antworten schließen, Gewinner anzeigen und am Ende die Gesamtrangliste präsentieren.</p>
+      <p class="sub">Self-paced Quiz: Teams beantworten alle Schätzfragen eigenständig. Ergebnisse werden erst nach Freigabe sichtbar.</p>
     </div>
     <div class="card" style="text-align:center">
       <img class="qr" src="/qr.svg" alt="QR-Code zum Mitspielen">
-      <div class="muted">QR-Code für Teilnehmende</div>
+      <div class="muted">QR-Code für Teams</div>
     </div>
   </section>
 
@@ -650,52 +798,18 @@ function adminHtml() {
     <input id="pin" type="password" placeholder="PIN eingeben">
     <div style="height:14px"></div>
     <button class="btn alt" id="loginBtn">Einloggen</button>
-    <p class="muted">Standard-PIN ist 1234, falls du in Render keine eigene PIN gesetzt hast.</p>
+    <p class="muted">Standard-PIN ist 1234, falls in Render keine eigene PIN gesetzt wurde.</p>
   </section>
 
   <main id="admin" class="hide">
-    <div class="grid">
-      <section class="card">
-        <h2>Neue Schätzfrage</h2>
-        <label for="qText">Frage</label>
-        <textarea id="qText" placeholder="z. B. Wie viele Kaffee wurden letztes Jahr ungefähr getrunken?"></textarea>
-        <div class="grid">
-          <div><label for="qAnswer">Richtige Zahl</label><input id="qAnswer" inputmode="decimal" placeholder="z. B. 12500"></div>
-          <div><label for="qUnit">Einheit optional</label><input id="qUnit" placeholder="z. B. Tassen, €, Stück"></div>
-        </div>
-        <div style="height:14px"></div>
-        <button class="btn green" id="addBtn">Frage hinzufügen</button>
-      </section>
+    <nav class="tabs" id="tabs"></nav>
 
-      <section class="card">
-        <div class="between"><h2>Live-Status</h2><span id="statusPill" class="pill status">Lobby</span></div>
-        <div id="liveBox"></div>
-        <div class="row" style="margin-top:14px">
-          <button class="btn ghost" id="closeBtn">Antworten schließen</button>
-          <button class="btn alt" id="revealBtn">Auflösen & Punkte vergeben</button>
-          <button class="btn ghost" id="lobbyBtn">Zur Lobby</button>
-        </div>
-      </section>
-    </div>
-
-    <div style="height:16px"></div>
-    <div class="grid">
-      <section class="card"><h2>Fragen</h2><div id="questions" class="list"></div></section>
-      <section class="card"><h2>Teilnehmende</h2><div id="participants" class="list"></div></section>
-    </div>
-
-    <div style="height:16px"></div>
-    <div class="grid">
-      <section class="card"><h2>Ergebnis aktuelle Frage</h2><div id="results"></div></section>
-      <section class="card">
-        <h2>Gesamtrangliste</h2>
-        <div id="leaderboard"></div>
-        <div class="row" style="margin-top:14px">
-          <button class="btn ghost" id="resetScoresBtn">Punkte zurücksetzen</button>
-          <button class="btn danger" id="resetAllBtn">Alles löschen</button>
-        </div>
-      </section>
-    </div>
+    <section id="tab-overview" class="tabPage active"></section>
+    <section id="tab-questions" class="tabPage"></section>
+    <section id="tab-progress" class="tabPage"></section>
+    <section id="tab-results" class="tabPage"></section>
+    <section id="tab-podium" class="tabPage"></section>
+    <section id="tab-settings" class="tabPage"></section>
   </main>
 </div>
 <div id="toast" class="toast"></div>
@@ -703,11 +817,16 @@ function adminHtml() {
 <script>
 var socket = io();
 var state = null;
-
-function qs(selector) {
-  return document.querySelector(selector);
-}
-
+var currentTab = "overview";
+var tabList = [
+  ["overview", "Übersicht"],
+  ["questions", "Fragen"],
+  ["progress", "Fortschritt"],
+  ["results", "Ergebnisse"],
+  ["podium", "Siegerehrung"],
+  ["settings", "Einstellungen"]
+];
+function qs(selector) { return document.querySelector(selector); }
 function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"]/g, function(character) {
     if (character === "&") return "&amp;";
@@ -716,215 +835,294 @@ function escapeHtml(value) {
     return "&quot;";
   });
 }
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(value);
-}
-
+function formatNumber(value) { return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(value); }
 function toast(message) {
   var element = qs("#toast");
   element.textContent = message;
   element.classList.add("show");
   setTimeout(function() { element.classList.remove("show"); }, 2600);
 }
-
-function statusText(status) {
-  if (status === "open") return "Offen";
+function clear(element) { while (element.firstChild) element.removeChild(element.firstChild); }
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+function table(headers, rows) {
+  var t = el("table", "table");
+  var thead = document.createElement("thead");
+  var trh = document.createElement("tr");
+  headers.forEach(function(header) { trh.appendChild(el("th", "", header)); });
+  thead.appendChild(trh);
+  t.appendChild(thead);
+  var tbody = document.createElement("tbody");
+  rows.forEach(function(row) {
+    var tr = document.createElement("tr");
+    row.forEach(function(cell) { tr.appendChild(el("td", "", cell)); });
+    tbody.appendChild(tr);
+  });
+  t.appendChild(tbody);
+  return t;
+}
+function statusLabel(status) {
+  if (status === "open") return "Offen für Antworten";
   if (status === "closed") return "Geschlossen";
-  if (status === "revealed") return "Aufgelöst";
-  return "Lobby";
+  if (status === "released") return "Ergebnisse freigegeben";
+  return "Noch nicht geöffnet";
 }
-
-function startQuestion(questionId) {
-  socket.emit("adminStartQuestion", { id: questionId });
+function completionText() {
+  return state.totalAnswers + " von " + state.totalPossibleAnswers + " Antworten abgegeben";
 }
-
-function removeQuestion(questionId) {
-  if (confirm("Frage löschen?")) {
-    socket.emit("adminRemoveQuestion", { id: questionId });
-  }
+function completionPercent() {
+  if (!state.totalPossibleAnswers) return 0;
+  return Math.round((state.totalAnswers / state.totalPossibleAnswers) * 100);
 }
-
-function renderLive() {
-  var question = state.currentQuestion;
-  var box = qs("#liveBox");
-
-  if (!question) {
-    box.innerHTML = '<p class="muted">Noch keine Frage aktiv.</p><p><b>' + state.participants.length + '</b> Teilnehmende verbunden.</p>';
-    return;
-  }
-
-  box.innerHTML = '<h3>' + escapeHtml(question.text) + '</h3><p class="big"><b>' + state.answerCount + '</b> Antworten</p><p class="muted">Lösung: ' + escapeHtml(formatNumber(question.answer)) + ' ' + escapeHtml(question.unit || '') + '</p>';
-}
-
-function renderQuestions() {
-  var box = qs("#questions");
-  box.innerHTML = "";
-
-  if (!state.questions.length) {
-    box.innerHTML = '<p class="muted">Noch keine Fragen angelegt.</p>';
-    return;
-  }
-
-  state.questions.forEach(function(question, index) {
-    var item = document.createElement("div");
-    item.className = "item";
-
-    var line = document.createElement("div");
-    line.className = "between";
-
-    var info = document.createElement("div");
-    var title = document.createElement("b");
-    title.textContent = (index + 1) + ". " + question.text;
-
-    var meta = document.createElement("span");
-    meta.className = "muted";
-    meta.textContent = "Lösung: " + formatNumber(question.answer) + " " + (question.unit || "");
-
-    info.appendChild(title);
-    info.appendChild(document.createElement("br"));
-    info.appendChild(meta);
-
-    var actions = document.createElement("div");
-    actions.className = "row";
-
-    var startButton = document.createElement("button");
-    startButton.className = "btn alt";
-    startButton.textContent = "Start";
-    startButton.onclick = function() { startQuestion(question.id); };
-
-    var removeButton = document.createElement("button");
-    removeButton.className = "btn ghost";
-    removeButton.textContent = "Löschen";
-    removeButton.onclick = function() { removeQuestion(question.id); };
-
-    actions.appendChild(startButton);
-    actions.appendChild(removeButton);
-    line.appendChild(info);
-    line.appendChild(actions);
-    item.appendChild(line);
-    box.appendChild(item);
+function buildTabs() {
+  var tabs = qs("#tabs");
+  clear(tabs);
+  tabList.forEach(function(tab) {
+    var button = el("button", "tab" + (currentTab === tab[0] ? " active" : ""), tab[1]);
+    button.onclick = function() { currentTab = tab[0]; render(); };
+    tabs.appendChild(button);
+  });
+  tabList.forEach(function(tab) {
+    var page = qs("#tab-" + tab[0]);
+    if (page) page.className = "tabPage" + (currentTab === tab[0] ? " active" : "");
   });
 }
-
-function renderParticipants() {
-  var box = qs("#participants");
-
-  if (!state.participants.length) {
-    box.innerHTML = '<p class="muted">Noch niemand beigetreten.</p>';
-    return;
-  }
-
-  box.innerHTML = state.participants.map(function(participant) {
-    return '<div class="item between"><span><b>' + escapeHtml(participant.name) + '</b></span><span class="pill">' + (participant.online ? 'online' : 'offline') + '</span></div>';
-  }).join('');
+function metric(label, value) {
+  var card = el("div", "card");
+  card.appendChild(el("div", "muted", label));
+  card.appendChild(el("div", "metric", value));
+  return card;
 }
-
+function actionButton(text, className, eventName, confirmText) {
+  var button = el("button", "btn " + className, text);
+  button.onclick = function() {
+    if (confirmText && !confirm(confirmText)) return;
+    socket.emit(eventName);
+  };
+  return button;
+}
+function renderOverview() {
+  var root = qs("#tab-overview");
+  clear(root);
+  var grid = el("div", "grid4");
+  grid.appendChild(metric("Quiz-Status", statusLabel(state.quizStatus)));
+  grid.appendChild(metric("Teams", String(state.teams.length)));
+  grid.appendChild(metric("Fragen", String(state.questions.length)));
+  grid.appendChild(metric("Fortschritt", completionPercent() + "%"));
+  root.appendChild(grid);
+  var card = el("div", "card");
+  card.style.marginTop = "16px";
+  card.appendChild(el("h2", "", "Hauptaktionen"));
+  var progress = el("div", "progressOuter");
+  var inner = el("div", "progressInner");
+  inner.style.width = completionPercent() + "%";
+  progress.appendChild(inner);
+  card.appendChild(progress);
+  card.appendChild(el("p", "muted", completionText()));
+  var row = el("div", "row");
+  row.appendChild(actionButton("Quiz öffnen", "green", "adminOpenQuiz"));
+  row.appendChild(actionButton("Quiz schließen", "ghost", "adminCloseQuiz"));
+  row.appendChild(actionButton("Ergebnisse freigeben", "alt", "adminReleaseResults"));
+  card.appendChild(row);
+  root.appendChild(card);
+  var info = el("div", "card");
+  info.style.marginTop = "16px";
+  info.appendChild(el("h2", "", "QR-Code"));
+  info.appendChild(el("p", "muted", "Den QR-Code oben rechts können Teams scannen. Ergebnisse sind erst nach Freigabe sichtbar."));
+  root.appendChild(info);
+}
+function renderQuestions() {
+  var root = qs("#tab-questions");
+  clear(root);
+  var grid = el("div", "grid");
+  var form = el("div", "card");
+  form.appendChild(el("h2", "", "Neue Frage anlegen"));
+  form.appendChild(labelInput("Fragetext", "qText", "textarea", "z. B. Wie viele Mitarbeitende hatte das Unternehmen im Jahr 2015?"));
+  form.appendChild(labelInput("Richtige Zahl", "qAnswer", "input", "z. B. 735"));
+  form.appendChild(labelInput("Einheit optional", "qUnit", "input", "z. B. Personen, €, Stück, km"));
+  form.appendChild(labelInput("Erklärung optional", "qExplanation", "textarea", "z. B. 2015 lag die Zahl der Mitarbeitenden bei 735."));
+  var add = el("button", "btn green", "Frage hinzufügen");
+  add.onclick = function() {
+    socket.emit("adminAddQuestion", {
+      text: qs("#qText").value,
+      answer: qs("#qAnswer").value,
+      unit: qs("#qUnit").value,
+      explanation: qs("#qExplanation").value
+    });
+  };
+  form.appendChild(add);
+  if (state.quizStatus !== "draft") form.appendChild(el("p", "muted", "Fragen können nur geändert werden, solange das Quiz noch nicht geöffnet wurde."));
+  grid.appendChild(form);
+  var list = el("div", "card");
+  list.appendChild(el("h2", "", "Fragenliste"));
+  if (!state.questions.length) {
+    list.appendChild(el("p", "muted", "Noch keine Fragen angelegt."));
+  } else {
+    state.questions.forEach(function(question, index) {
+      var item = el("div", "item");
+      item.appendChild(el("h3", "", (index + 1) + ". " + question.text));
+      item.appendChild(el("p", "muted", "Lösung: " + formatNumber(question.answer) + " " + (question.unit || "")));
+      if (question.explanation) item.appendChild(el("p", "muted", question.explanation));
+      var del = el("button", "btn ghost", "Löschen");
+      del.onclick = function() {
+        if (confirm("Diese Frage wirklich löschen?")) socket.emit("adminRemoveQuestion", { id: question.id });
+      };
+      item.appendChild(del);
+      list.appendChild(item);
+    });
+  }
+  grid.appendChild(list);
+  root.appendChild(grid);
+}
+function labelInput(labelText, id, type, placeholder) {
+  var wrap = el("div");
+  var label = el("label", "", labelText);
+  label.setAttribute("for", id);
+  var input = type === "textarea" ? document.createElement("textarea") : document.createElement("input");
+  input.id = id;
+  input.placeholder = placeholder;
+  if (type !== "textarea") input.inputMode = id === "qAnswer" ? "decimal" : "text";
+  wrap.appendChild(label);
+  wrap.appendChild(input);
+  return wrap;
+}
+function renderProgress() {
+  var root = qs("#tab-progress");
+  clear(root);
+  var grid = el("div", "grid");
+  var teams = el("div", "card");
+  teams.appendChild(el("h2", "", "Fortschritt je Team"));
+  if (!state.teamProgress.length) {
+    teams.appendChild(el("p", "muted", "Noch keine Teams beigetreten."));
+  } else {
+    teams.appendChild(table(["Team/Symbol", "Fortschritt", "Status"], state.teamProgress.map(function(team) {
+      return [team.label, team.answered + " von " + team.total, team.complete ? "Fertig" : (team.online ? "Online" : "Offline")];
+    })));
+  }
+  grid.appendChild(teams);
+  var questions = el("div", "card");
+  questions.appendChild(el("h2", "", "Antwortanzahl je Frage"));
+  if (!state.questionStats.length) {
+    questions.appendChild(el("p", "muted", "Noch keine Fragen angelegt."));
+  } else {
+    questions.appendChild(table(["Frage", "Antworten"], state.questionStats.map(function(question) {
+      return [String(question.index + 1), question.answerCount + " Antworten"];
+    })));
+  }
+  grid.appendChild(questions);
+  root.appendChild(grid);
+}
 function renderResults() {
-  var box = qs("#results");
-  var question = state.currentQuestion;
-
-  if (!question) {
-    box.innerHTML = '<p class="muted">Keine aktive Frage.</p>';
+  var root = qs("#tab-results");
+  clear(root);
+  if (state.quizStatus !== "released") {
+    var card = el("div", "card screen");
+    var inner = el("div");
+    inner.appendChild(el("div", "pill status", statusLabel(state.quizStatus)));
+    inner.appendChild(el("h2", "", "Die Ergebnisse sind noch nicht freigegeben."));
+    inner.appendChild(el("p", "sub", "Schließe das Quiz und gib die Ergebnisse frei, damit Ranglisten und Auswertungen sichtbar werden."));
+    card.appendChild(inner);
+    root.appendChild(card);
     return;
   }
-
-  var unit = question.unit || "";
-
-  if (!state.results.length) {
-    box.innerHTML = '<p class="muted">Noch keine Antworten.</p>';
-    return;
-  }
-
-  box.innerHTML = '<table class="table"><thead><tr><th>Platz</th><th>Name</th><th>Schätzung</th><th>Abstand</th></tr></thead><tbody>' +
-    state.results.map(function(result) {
-      return '<tr><td class="rank">#' + result.rank + '</td><td>' + escapeHtml(result.name) + '</td><td>' + escapeHtml(result.valueLabel) + ' ' + escapeHtml(unit) + '</td><td>' + escapeHtml(result.diffLabel) + ' ' + escapeHtml(unit) + '</td></tr>';
-    }).join('') +
-    '</tbody></table>';
+  var boardCard = el("div", "card");
+  boardCard.appendChild(el("h2", "", "Top 10 Gesamtrangliste"));
+  boardCard.appendChild(table(["Platz", "Team/Symbol", "Punkte", "Ø Abstand", "Beantwortet"], state.leaderboard.slice(0, 10).map(function(row) {
+    return ["#" + row.rank, row.teamLabel, String(row.score), row.avgDiffLabel, String(row.answered)];
+  })));
+  var podiumBtn = el("button", "btn alt", "Siegerehrung anzeigen");
+  podiumBtn.onclick = function() { currentTab = "podium"; render(); };
+  boardCard.appendChild(podiumBtn);
+  root.appendChild(boardCard);
+  state.questionResults.forEach(function(question, index) {
+    var card = el("div", "card");
+    card.style.marginTop = "16px";
+    card.appendChild(el("h2", "", "Frage " + (index + 1)));
+    card.appendChild(el("h3", "", question.text));
+    card.appendChild(el("p", "", "Richtige Antwort: " + question.answerLabel + " " + (question.unit || "")));
+    card.appendChild(el("p", "muted", "Gewinnerteam(s): " + (question.winners.length ? question.winners.join(", ") : "-")));
+    if (question.explanation) card.appendChild(el("p", "muted", question.explanation));
+    card.appendChild(table(["Platz", "Team/Symbol", "Schätzung", "Abstand"], question.results.map(function(row) {
+      return ["#" + row.rank, row.teamLabel, row.valueLabel + " " + (question.unit || ""), row.diffLabel + " " + (question.unit || "")];
+    })));
+    root.appendChild(card);
+  });
 }
-
-function renderLeaderboard() {
-  var box = qs("#leaderboard");
-
-  if (!state.leaderboard.length) {
-    box.innerHTML = '<p class="muted">Noch keine Punkte.</p>';
+function renderPodium() {
+  var root = qs("#tab-podium");
+  clear(root);
+  var card = el("div", "card screen");
+  var inner = el("div");
+  inner.appendChild(el("div", "pill status", "Siegerehrung"));
+  inner.appendChild(el("h1", "", "Herzlichen Glückwunsch!"));
+  inner.appendChild(el("p", "sub", "Unsere Gewinnerteams"));
+  if (state.quizStatus !== "released" || !state.leaderboard.length) {
+    inner.appendChild(el("p", "muted", "Noch keine freigegebenen Ergebnisse vorhanden."));
+    card.appendChild(inner);
+    root.appendChild(card);
     return;
   }
-
-  box.innerHTML = '<table class="table"><thead><tr><th>Platz</th><th>Name</th><th>Punkte</th></tr></thead><tbody>' +
-    state.leaderboard.map(function(row) {
-      return '<tr><td class="rank">#' + row.rank + '</td><td>' + escapeHtml(row.name) + '</td><td><b>' + row.score + '</b></td></tr>';
-    }).join('') +
-    '</tbody></table><p class="muted">Punkte pro Frage: Platz 1 = 3, Platz 2 = 2, Platz 3 = 1. Bei Gleichstand bekommen beide denselben Platz.</p>';
+  var places = [
+    state.leaderboard.filter(function(row) { return row.rank === 1; }),
+    state.leaderboard.filter(function(row) { return row.rank === 2; }),
+    state.leaderboard.filter(function(row) { return row.rank === 3; })
+  ];
+  var podium = el("div", "podium");
+  podium.appendChild(podiumCard("🥈", "Platz 2", places[1], "second"));
+  podium.appendChild(podiumCard("🥇", "Platz 1", places[0], "first"));
+  podium.appendChild(podiumCard("🥉", "Platz 3", places[2], "third"));
+  inner.appendChild(podium);
+  if (places.some(function(list) { return list.length > 1; })) inner.appendChild(el("p", "muted", "Hinweis: Es gibt einen Gleichstand auf dem Podium."));
+  card.appendChild(inner);
+  root.appendChild(card);
 }
-
+function podiumCard(icon, title, rows, extraClass) {
+  var card = el("div", "podiumCard " + extraClass);
+  card.appendChild(el("div", "medal", icon));
+  card.appendChild(el("h2", "", title));
+  if (!rows.length) {
+    card.appendChild(el("p", "muted", "-"));
+    return card;
+  }
+  rows.forEach(function(row) {
+    card.appendChild(el("h3", "", row.teamLabel));
+    card.appendChild(el("p", "", row.score + " Punkte"));
+  });
+  return card;
+}
+function renderSettings() {
+  var root = qs("#tab-settings");
+  clear(root);
+  var card = el("div", "card");
+  card.appendChild(el("h2", "", "Einstellungen & Zurücksetzen"));
+  card.appendChild(el("p", "muted", "Aktuelle Admin-PIN: " + state.adminPin));
+  card.appendChild(el("p", "muted", "Die Daten werden nur im Arbeitsspeicher gespeichert. Bei einem Neustart des Servers können Daten verloren gehen."));
+  var row = el("div", "row");
+  row.appendChild(actionButton("Nur Teams & Antworten zurücksetzen", "ghost", "adminResetTeams", "Teams, Antworten und Fortschritt löschen, aber Fragen behalten?"));
+  row.appendChild(actionButton("Alles zurücksetzen", "danger", "adminResetAll", "Wirklich alles löschen, inklusive Fragen?"));
+  card.appendChild(row);
+  root.appendChild(card);
+}
 function render() {
   if (!state) return;
-  qs("#statusPill").textContent = statusText(state.status);
-  renderLive();
+  buildTabs();
+  renderOverview();
   renderQuestions();
-  renderParticipants();
+  renderProgress();
   renderResults();
-  renderLeaderboard();
+  renderPodium();
+  renderSettings();
 }
-
-qs("#loginBtn").onclick = function() {
-  socket.emit("adminAuth", { pin: qs("#pin").value });
-};
-
-qs("#pin").addEventListener("keydown", function(event) {
-  if (event.key === "Enter") {
-    socket.emit("adminAuth", { pin: qs("#pin").value });
-  }
-});
-
-qs("#addBtn").onclick = function() {
-  socket.emit("adminAddQuestion", {
-    text: qs("#qText").value,
-    answer: qs("#qAnswer").value,
-    unit: qs("#qUnit").value
-  });
-};
-
-qs("#closeBtn").onclick = function() {
-  socket.emit("adminCloseQuestion");
-};
-
-qs("#revealBtn").onclick = function() {
-  socket.emit("adminRevealQuestion");
-};
-
-qs("#lobbyBtn").onclick = function() {
-  socket.emit("adminBackToLobby");
-};
-
-qs("#resetScoresBtn").onclick = function() {
-  if (confirm("Punkte und Historie zurücksetzen?")) {
-    socket.emit("adminResetScores");
-  }
-};
-
-qs("#resetAllBtn").onclick = function() {
-  if (confirm("Alles löschen: Fragen, Teilnehmende und Punkte?")) {
-    socket.emit("adminResetAll");
-  }
-};
-
-socket.on("connect", function() {
-  console.log("Admin verbunden");
-});
-
-socket.on("adminAuthed", function() {
-  qs("#login").classList.add("hide");
-  qs("#admin").classList.remove("hide");
-});
-
+qs("#loginBtn").onclick = function() { socket.emit("adminAuth", { pin: qs("#pin").value }); };
+qs("#pin").addEventListener("keydown", function(event) { if (event.key === "Enter") socket.emit("adminAuth", { pin: qs("#pin").value }); });
+socket.on("connect", function() { console.log("Admin verbunden"); });
+socket.on("adminAuthed", function() { qs("#login").classList.add("hide"); qs("#admin").classList.remove("hide"); });
 socket.on("adminError", toast);
-
-socket.on("adminState", function(nextState) {
-  state = nextState;
-  render();
-});
+socket.on("adminState", function(nextState) { state = nextState; render(); });
 </script>
 </body></html>`;
 }
