@@ -17,6 +17,7 @@ const QRCode = require("qrcode");
 
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PIN = String(process.env.ADMIN_PIN || "1234");
+const ADMIN_SECRET_PATH = process.env.ADMIN_SECRET_PATH || "/moderation-2468";
 
 const app = express();
 const server = http.createServer(app);
@@ -193,7 +194,8 @@ app.get("/qr.svg", async (req, res) => {
 });
 
 app.get("/", (req, res) => res.send(participantHtml()));
-app.get("/admin", (req, res) => res.send(adminHtml()));
+app.get("/admin", (req, res) => res.send(adminHtml(false)));
+app.get(ADMIN_SECRET_PATH, (req, res) => res.send(adminHtml(true)));
 
 io.on("connection", socket => {
   socket.on("participantJoin", data => {
@@ -238,6 +240,13 @@ io.on("connection", socket => {
     } else {
       socket.emit("adminError", "Falsche PIN.");
     }
+  });
+
+  socket.on("adminSecretAuth", () => {
+    socket.data.isAdmin = true;
+    socket.join("admins");
+    socket.emit("adminAuthed");
+    socket.emit("adminState", adminPayload());
   });
 
   socket.on("adminAddQuestion", data => {
@@ -409,7 +418,7 @@ let lastState = null;
 if (localStorage.getItem(nameKey)) $("#name").value = localStorage.getItem(nameKey);
 
 function toast(t){ const el=$("#toast"); el.textContent=t; el.classList.add("show"); setTimeout(()=>el.classList.remove("show"),2400); }
-function esc(s){ return String(s ?? "").replace(/[&<>\"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;"}[c])); }
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;"); }
 function join(){
   const name = $("#name").value.trim();
   if(!name){ toast("Bitte Namen eingeben."); return; }
@@ -462,7 +471,7 @@ function leaderboardHtml(rows){
 </body></html>`;
 }
 
-function adminHtml() {
+function adminHtml(secretAccess = false) {
   return `${commonHead("Schätzquiz Moderation")}
 <body>
 <div class="wrap">
@@ -478,7 +487,7 @@ function adminHtml() {
     </div>
   </section>
 
-  <section id="login" class="card narrow">
+  <section id="login" class="card narrow ${secretAccess ? "hide" : ""}">
     <h2>Moderations-PIN</h2>
     <input id="pin" type="password" placeholder="PIN eingeben">
     <div style="height:14px"></div>
@@ -486,7 +495,7 @@ function adminHtml() {
     <p class="muted">Standard-PIN ist 1234, falls du beim Start keine eigene PIN gesetzt hast.</p>
   </section>
 
-  <main id="admin" class="hide">
+  <main id="admin" class="${secretAccess ? "" : "hide"}">
     <div class="grid">
       <section class="card">
         <h2>Neue Schätzfrage</h2>
@@ -527,10 +536,11 @@ function adminHtml() {
 <script src="/socket.io/socket.io.js"></script>
 <script>
 const socket = io();
+const secretAccess = ${secretAccess ? "true" : "false"};
 const $ = s => document.querySelector(s);
 let state = null;
 function toast(t){ const el=$("#toast"); el.textContent=t; el.classList.add("show"); setTimeout(()=>el.classList.remove("show"),2600); }
-function esc(s){ return String(s ?? "").replace(/[&<>\"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;"}[c])); }
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;"); }
 function fmt(n){ return new Intl.NumberFormat("de-DE",{maximumFractionDigits:2}).format(n); }
 
 $("#loginBtn").onclick = () => socket.emit("adminAuth", {pin:$("#pin").value});
@@ -542,6 +552,7 @@ $("#lobbyBtn").onclick = () => socket.emit("adminBackToLobby");
 $("#resetScoresBtn").onclick = () => { if(confirm("Punkte und Historie zurücksetzen?")) socket.emit("adminResetScores"); };
 $("#resetAllBtn").onclick = () => { if(confirm("Alles löschen: Fragen, Teilnehmende und Punkte?")) socket.emit("adminResetAll"); };
 
+socket.on("connect", () => { if (secretAccess) socket.emit("adminSecretAuth"); });
 socket.on("adminAuthed", () => { $("#login").classList.add("hide"); $("#admin").classList.remove("hide"); });
 socket.on("adminError", toast);
 socket.on("adminState", s => { state = s; render(); });
