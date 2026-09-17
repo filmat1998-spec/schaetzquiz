@@ -24,21 +24,63 @@ const io = new Server(server, { cors: { origin: "*" } });
 const sampleQuestions = [
   {
     id: "testfrage1",
-    text: "Wie viele Tassen Kaffee werden bei uns ungefähr pro Monat getrunken?",
-    answer: 1250,
-    unit: "Tassen"
+    text: "Wie viele Haare hat ein Mensch durchschnittlich auf dem Kopf?",
+    answer: 100000,
+    unit: "Haare"
   },
   {
     id: "testfrage2",
-    text: "Wie viele Mitarbeitende waren ungefähr bei der letzten Mitarbeiterversammlung dabei?",
-    answer: 20,
-    unit: "Personen"
+    text: "Wie schwer ist ein ausgewachsener Blauwal ungefähr?",
+    answer: 150000,
+    unit: "kg"
   },
   {
     id: "testfrage3",
-    text: "Wie viele Kilometer legt unser Team zusammen ungefähr pro Arbeitswoche zurück?",
-    answer: 480,
+    text: "Wie viele Liter Blut hat ein erwachsener Mensch durchschnittlich?",
+    answer: 5,
+    unit: "Liter"
+  },
+  {
+    id: "testfrage4",
+    text: "Wie viele Bienen leben im Sommer ungefähr in einem Bienenvolk?",
+    answer: 50000,
+    unit: "Bienen"
+  },
+  {
+    id: "testfrage5",
+    text: "Wie viele Menschen passen ungefähr in das größte Fußballstadion der Welt?",
+    answer: 114000,
+    unit: "Menschen"
+  },
+  {
+    id: "testfrage6",
+    text: "Wie alt wurde der älteste bekannte Mensch?",
+    answer: 122,
+    unit: "Jahre"
+  },
+  {
+    id: "testfrage7",
+    text: "Wie viele Kilometer ist der Mond im Durchschnitt von der Erde entfernt?",
+    answer: 384400,
     unit: "km"
+  },
+  {
+    id: "testfrage8",
+    text: "Wie tief ist die tiefste bekannte Stelle im Meer ungefähr?",
+    answer: 10984,
+    unit: "m"
+  },
+  {
+    id: "testfrage9",
+    text: "Wie viele Liter Wasser verbraucht eine Person in Deutschland durchschnittlich pro Tag im Haushalt?",
+    answer: 125,
+    unit: "Liter"
+  },
+  {
+    id: "testfrage10",
+    text: "Wie schwer ist ein durchschnittlicher Elefant ungefähr?",
+    answer: 6000,
+    unit: "kg"
   }
 ];
 
